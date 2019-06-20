@@ -11,6 +11,7 @@ import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.graphics.YuvImage;
 import android.hardware.camera2.CameraAccessException;
@@ -25,6 +26,11 @@ import android.media.ImageReader;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.renderscript.Allocation;
+import android.renderscript.Element;
+import android.renderscript.RenderScript;
+import android.renderscript.ScriptIntrinsicYuvToRGB;
+import android.renderscript.Type;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.v4.app.ActivityCompat;
@@ -63,6 +69,12 @@ public class PreviewCameraActivity extends AppCompatActivity {
     private boolean mIsShutter;
     private ImageView mImageView;
 
+    private RenderScript mRenderScript;
+    private ScriptIntrinsicYuvToRGB mYuvToRGB;
+    private Type.Builder mYuvType, mRgbaType;
+    private Allocation mIn, mOut;
+
+
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -71,6 +83,8 @@ public class PreviewCameraActivity extends AppCompatActivity {
         mSurfaceHolder = ((SurfaceView) findViewById(R.id.usb_preview_content)).getHolder();
         mSurfaceHolder.addCallback(mSurfaceHolderCallBack);
         mImageView = (ImageView) findViewById(R.id.image);
+        mRenderScript = RenderScript.create(this);
+        mYuvToRGB = ScriptIntrinsicYuvToRGB.create(mRenderScript, Element.U8_4(mRenderScript));
     }
 
     @Override
@@ -115,12 +129,14 @@ public class PreviewCameraActivity extends AppCompatActivity {
         public void onError(@NonNull CameraDevice camera, int error) {
             Log.i("camera","camera_Error");
         }
+
     };
 
     private SurfaceHolder.Callback mSurfaceHolderCallBack = new SurfaceHolder.Callback() {
         @Override
         public void surfaceCreated(SurfaceHolder holder) {
             setupCamera(holder.getSurfaceFrame().width(),holder.getSurfaceFrame().height());
+            mSurfaceHolder.setFixedSize(mPreviewSize.getWidth(),mPreviewSize.getHeight());
             //CameraManager mCameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
             try {
                 if (ActivityCompat.checkSelfPermission(PreviewCameraActivity.this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -151,6 +167,7 @@ public class PreviewCameraActivity extends AppCompatActivity {
         public void surfaceDestroyed(SurfaceHolder holder) {
 
         }
+
     };
 
     private void setupCamera(int width, int height){
@@ -162,7 +179,7 @@ public class PreviewCameraActivity extends AppCompatActivity {
             mPreviewImageReader = ImageReader.newInstance(
                     mPreviewSize.getWidth(),
                     mPreviewSize.getHeight(),
-                    ImageFormat.JPEG,
+                    ImageFormat.YUV_420_888,
                     1
             );
             mPreviewImageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
@@ -176,33 +193,82 @@ public class PreviewCameraActivity extends AppCompatActivity {
                     int width = image.getWidth();
                     int height = image.getHeight();
 
-                    // YUV_420_888
-                    Image.Plane[] planes = image.getPlanes();
-                    byte[] res = new byte[planes[0].getBuffer().remaining()];
-                    planes[0].getBuffer().get(res);
+                    byte[] data = getDataFromImage(image,COLOR_FormatNV21);
+                    if(mYuvType == null){
+                        mYuvType = new Type.Builder(mRenderScript, Element.U8(mRenderScript))
+                                .setX(data.length);
+                        mIn = Allocation.createTyped(mRenderScript, mYuvType.create(), Allocation.USAGE_SCRIPT);
 
-                    Bitmap bitmap = BitmapFactory.decodeByteArray(res
-                            ,0,res.length);
+                        mRgbaType = new Type.Builder(mRenderScript, Element.RGBA_8888(mRenderScript))
+                                .setX(mPreviewSize.getWidth()).setY(mPreviewSize.getHeight());
+                        mOut = Allocation.createTyped(mRenderScript, mRgbaType.create(), Allocation.USAGE_SCRIPT);
+                    }
 
-                    //Canvas canvas = new Canvas(newBitmap);
-                    Paint paint = new Paint();
+                    mIn.copyFrom(data);
+                    mYuvToRGB.setInput(mIn);
+                    mYuvToRGB.forEach(mOut);
+
+                    Bitmap bitmap = Bitmap.createBitmap(width,height, Bitmap.Config.ARGB_8888);
+                    mOut.copyTo(bitmap);
                     Matrix matrix = new Matrix();
-                    //matrix.setScale(1,-1);
-                    //matrix.postTranslate(bitmap.getWidth(),0);
-                    //matrix.postRotate(90,bitmap.getWidth()/2,bitmap.getHeight()/2);
+                    matrix.setScale(0.5f,0.5f);
                     matrix.postRotate(90);
-                    Bitmap newBitmap = Bitmap.createBitmap(bitmap,0,0
-                            ,mPreviewSize.getWidth(),mPreviewSize.getHeight(),matrix,true);
-                    //matrix.postTranslate(0,(bitmap.getWidth()-bitmap.getHeight())/2);
-                    //canvas.drawBitmap(bitmap,matrix,paint);
-                    Log.i("widthheight",mPreviewSize.getHeight()+"anc"+mPreviewSize.getWidth());
-                    Log.i("widthheight",newBitmap.getHeight()+"anc"+newBitmap.getWidth());
-                    mImageView.setImageBitmap(newBitmap);
-                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    newBitmap.compress(Bitmap.CompressFormat.JPEG, 70, baos);
+                    ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+//                    YuvImage yuvImage = new YuvImage(getDataFromImage(image,COLOR_FormatNV21)
+//                            ,ImageFormat.NV21, mPreviewSize.getWidth()
+//                            , mPreviewSize.getHeight(),null);
+//                    yuvImage.compressToJpeg(new Rect(0,0,width,height),50,outputStream);
+//                    Log.i("picturesize","ss"+outputStream.toByteArray().length);
+//                    Bitmap bitmap = BitmapFactory.decodeByteArray(outputStream.toByteArray(),
+//                            0,outputStream.toByteArray().length);
+//                    Matrix matrix = new Matrix();
+//                    bitmap.recycle();
+                    Bitmap newBitmap = Bitmap.createBitmap(bitmap
+                            ,0
+                            ,0
+                            ,bitmap.getWidth()
+                            ,bitmap.getHeight()
+                            ,matrix
+                            ,true);
 
+//                    Bitmap newBitmap = Bitmap.createBitmap(bitmap,0,0
+//                            ,mPreviewSize.getWidth()
+//                            ,mPreviewSize.getHeight(),matrix,true);
+//                    newBitmap.compress(Bitmap.CompressFormat.JPEG,50,outputStream);
+                    newBitmap.compress(Bitmap.CompressFormat.JPEG,100, outputStream);
+                    outputStream.toByteArray();
+                    mImageView.setImageBitmap(newBitmap);
                     //newBitmap.recycle();
                     bitmap.recycle();
+                    Log.i("widthheight",newBitmap.getHeight()+"anc"+newBitmap.getWidth());
+
+                    //newBitmap.compress(ImageFormat.JPEG)
+                    //matrix.postTranslate(0,(bitmap.getWidth()-bitmap.getHeight())/2);
+//                    byte[] res = new byte[planes[0].getBuffer().remaining()];
+//                    planes[0].getBuffer().get(res);
+//
+//                    Bitmap bitmap = BitmapFactory.decodeByteArray(res
+//                            ,0,res.length);
+//
+//                    //Canvas canvas = new Canvas(newBitmap);
+//                    Paint paint = new Paint();
+//                    Matrix matrix = new Matrix();
+//                    //matrix.setScale(1,-1);
+//                    //matrix.postTranslate(bitmap.getWidth(),0);
+//                    //matrix.postRotate(90,bitmap.getWidth()/2,bitmap.getHeight()/2);
+//                    matrix.postRotate(90);
+//                    Bitmap newBitmap = Bitmap.createBitmap(bitmap,0,0
+//                            ,mPreviewSize.getWidth(),mPreviewSize.getHeight(),matrix,true);
+//                    //matrix.postTranslate(0,(bitmap.getWidth()-bitmap.getHeight())/2);
+//                    //canvas.drawBitmap(bitmap,matrix,paint);
+//                    Log.i("widthheight",mPreviewSize.getHeight()+"anc"+mPreviewSize.getWidth());
+
+//                    mImageView.setImageBitmap(newBitmap);
+//                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+//                    newBitmap.compress(Bitmap.CompressFormat.JPEG, 70, baos);
+//
+//                    //newBitmap.recycle();
+//                    bitmap.recycle();
                     // 一定不能忘记close
                     image.close();
                 }
@@ -282,5 +348,92 @@ public class PreviewCameraActivity extends AppCompatActivity {
             mCameraCaptureSession = null;
         if(mCameraDevice != null)
             mCameraDevice = null;
+    }
+
+
+
+
+    private static final int COLOR_FormatI420 = 1;
+    private static final int COLOR_FormatNV21 = 2;
+
+    private static boolean isImageFormatSupported(Image image) {
+        int format = image.getFormat();
+        switch (format) {
+            case ImageFormat.YUV_420_888:
+            case ImageFormat.NV21:
+            case ImageFormat.YV12:
+                return true;
+        }
+        return false;
+    }
+
+    private static byte[] getDataFromImage(Image image, int colorFormat) {
+        if (colorFormat != COLOR_FormatI420 && colorFormat != COLOR_FormatNV21) {
+            throw new IllegalArgumentException("only support COLOR_FormatI420 " + "and COLOR_FormatNV21");
+        }
+        if (!isImageFormatSupported(image)) {
+            throw new RuntimeException("can't convert Image to byte array, format " + image.getFormat());
+        }
+        Rect crop = image.getCropRect();
+        int format = image.getFormat();
+        int width = crop.width();
+        int height = crop.height();
+        Image.Plane[] planes = image.getPlanes();
+        byte[] data = new byte[width * height * ImageFormat.getBitsPerPixel(format) / 8];
+        byte[] rowData = new byte[planes[0].getRowStride()];
+        int channelOffset = 0;
+        int outputStride = 1;
+        for (int i = 0; i < planes.length; i++) {
+            switch (i) {
+                case 0:
+                    channelOffset = 0;
+                    outputStride = 1;
+                    break;
+                case 1:
+                    if (colorFormat == COLOR_FormatI420) {
+                        channelOffset = width * height;
+                        outputStride = 1;
+                    } else if (colorFormat == COLOR_FormatNV21) {
+                        channelOffset = width * height + 1;
+                        outputStride = 2;
+                    }
+                    break;
+                case 2:
+                    if (colorFormat == COLOR_FormatI420) {
+                        channelOffset = (int) (width * height * 1.25);
+                        outputStride = 1;
+                    } else if (colorFormat == COLOR_FormatNV21) {
+                        channelOffset = width * height;
+                        outputStride = 2;
+                    }
+                    break;
+            }
+            ByteBuffer buffer = planes[i].getBuffer();
+            int rowStride = planes[i].getRowStride();
+            int pixelStride = planes[i].getPixelStride();
+            int shift = (i == 0) ? 0 : 1;
+            int w = width >> shift;
+            int h = height >> shift;
+            buffer.position(rowStride * (crop.top >> shift) + pixelStride * (crop.left >> shift));
+            for (int row = 0; row < h; row++) {
+                int length;
+                if (pixelStride == 1 && outputStride == 1) {
+                    length = w;
+                    buffer.get(data, channelOffset, length);
+                    channelOffset += length;
+                } else {
+                    length = (w - 1) * pixelStride + 1;
+                    buffer.get(rowData, 0, length);
+                    for (int col = 0; col < w; col++) {
+                        data[channelOffset] = rowData[col * pixelStride];
+                        channelOffset += outputStride;
+                    }
+                }
+                if (row < h - 1) {
+                    buffer.position(buffer.position() + rowStride - length);
+                }
+            }
+        }
+        return data;
     }
 }
